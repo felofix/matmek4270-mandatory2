@@ -4,30 +4,44 @@ import scipy.sparse as sparse
 from scipy.integrate import quad
 from numpy.polynomial import Legendre as Leg
 from numpy.polynomial import Chebyshev as Cheb
+from scipy.sparse import csr_matrix
 
 x = sp.Symbol('x')
 
-
 def map_reference_domain(x, d, r):
+    """
+    Maps the function values to the computational domain
+    to ensure that the basis functions are orthogonal. 
+    """
     return r[0] + (r[1]-r[0])*(x-d[0])/(d[1]-d[0])
 
-
 def map_true_domain(x, d, r):
+    """
+    Maps back to the original domain. 
+    """
     return d[0] + (d[1]-d[0])*(x-r[0])/(r[1]-r[0])
 
-
 def map_expression_true_domain(u, x, d, r):
+    """
+    Maps a function to the original domain. 
+    """
     if d != r:
         u = sp.sympify(u)
         xm = map_true_domain(x, d, r)
         u = u.replace(x, xm)
     return u
 
-
 class FunctionSpace:
+    """
+    Reference domain. (x)
+    Basis functions. (x)
+    Derivative_basis_function. (x)
+    eval_derivative_basis_function_all. (x)
+    """
     def __init__(self, N, domain=(-1, 1)):
         self.N = N
         self._domain = domain
+        self._reference_domain = (-1.0, 1.0)
 
     @property
     def domain(self):
@@ -35,7 +49,7 @@ class FunctionSpace:
 
     @property
     def reference_domain(self):
-        raise RuntimeError
+        return self._reference_domain
 
     @property
     def domain_factor(self):
@@ -94,8 +108,11 @@ class FunctionSpace:
     def mass_matrix(self):
         return assemble_generic_matrix(TrialFunction(self), TestFunction(self))
 
-
 class Legendre(FunctionSpace):
+    """
+    L2_norm_sq. (x)
+    mass_matrx. (x)
+    """
 
     def __init__(self, N, domain=(-1, 1)):
         FunctionSpace.__init__(self, N, domain=domain)
@@ -109,10 +126,15 @@ class Legendre(FunctionSpace):
         return self.basis_function(j).deriv(k)
 
     def L2_norm_sq(self, N):
-        raise NotImplementedError
+        l2 = np.ones(N)*2
+
+        for i in range(1, N):
+            l2[i] /= (2*i+1)
+
+        return l2
 
     def mass_matrix(self):
-        raise NotImplementedError
+        return assemble_generic_matrix(TrialFunction(self), TestFunction(self))
 
     def eval(self, uh, xj):
         xj = np.atleast_1d(xj)
@@ -121,7 +143,10 @@ class Legendre(FunctionSpace):
 
 
 class Chebyshev(FunctionSpace):
-
+    """
+    L2_norm_sq. (x)
+    mass_matrx. (x)
+    """
     def __init__(self, N, domain=(-1, 1)):
         FunctionSpace.__init__(self, N, domain=domain)
 
@@ -137,10 +162,12 @@ class Chebyshev(FunctionSpace):
         return 1/sp.sqrt(1-x**2)
 
     def L2_norm_sq(self, N):
-        raise NotImplementedError
+        l2 = np.ones(N)*np.pi
+        l2[1:] /= 2
+        return l2
 
     def mass_matrix(self):
-        raise NotImplementedError
+        return assemble_generic_matrix(TrialFunction(self), TestFunction(self))
 
     def eval(self, uh, xj):
         xj = np.atleast_1d(xj)
@@ -201,23 +228,32 @@ class Sines(Trigonometric):
     def L2_norm_sq(self, N):
         return 0.5
 
-
 class Cosines(Trigonometric):
+    #__init__. (x)
+    #basis_function. (x)
+    #derivative_basis_function. (x)
+    #L2_norm_sq. (x)
 
     def __init__(self, N, domain=(0, 1), bc=(0, 0)):
-        raise NotImplementedError
+        Trigonometric.__init__(self, N, domain=domain)
+        self.B = Neumann(bc, domain, self.reference_domain)
 
     def basis_function(self, j, sympy=False):
-        raise NotImplementedError
+        if sympy:
+            return sp.cos(j * sp.pi * x)
+        return lambda Xj: np.cos(j * np.pi * Xj)
 
     def derivative_basis_function(self, j, k=1):
-        raise NotImplementedError
+        scale = (-1)**(k/2) * (j * np.pi)**k
+        return lambda Xj: scale * np.sin(j * np.pi * Xj) if k % 2 == 1 else scale * np.cos(j * np.pi * Xj)
 
     def L2_norm_sq(self, N):
-        raise NotImplementedError
+        l2 = np.ones(N)
+        l2[1:] /= 2
+        return l2
+
 
 # Create classes to hold the boundary function
-
 class Dirichlet:
 
     def __init__(self, bc, domain, reference_domain):
@@ -281,7 +317,6 @@ class Composite(FunctionSpace):
                          shape=(self.N+3, self.N+3), format='csr')
         return self.S @ M @ self.S.T
 
-
 class DirichletLegendre(Composite, Legendre):
     def __init__(self, N, domain=(-1, 1), bc=(0, 0)):
         Legendre.__init__(self, N, domain=domain)
@@ -289,19 +324,28 @@ class DirichletLegendre(Composite, Legendre):
         self.S = sparse.diags((1, -1), (0, 2), shape=(N+1, N+3), format='csr')
 
     def basis_function(self, j, sympy=False):
-        raise NotImplementedError
-
+        Qj = Legendre.basis_function(self, j, sympy)
+        Qjp2 = Legendre.basis_function(self, j + 2, sympy)
+        return Qj - Qjp2
 
 class NeumannLegendre(Composite, Legendre):
     def __init__(self, N, domain=(-1, 1), bc=(0, 0), constraint=0):
-        raise NotImplementedError
+        Legendre.__init__(self, N, domain=domain)
+        self.B = Neumann(bc, domain, self.reference_domain)
+        self.S = sparse.diags((1, self.neumann_boundaries_legendre(N)),
+                              (0, 2), shape=(N+1, N+3), format='csr')
 
     def basis_function(self, j, sympy=False):
-        raise NotImplementedError
+        if sympy:
+            return sp.legendre(j,x)-j*(j+1)/((j+2)*(j+3))*sp.legendre(j+2,x)
+        return Leg.basis(j) - j*(j+1)/((j+2)*(j+3))*Leg.basis(j+2)
+
+    def neumann_boundaries_legendre(self, N):
+        weights = [-(i*(i+1)/((i+2)*(i+3))) for i in range(0, N + 1)]
+        return weights
 
 
 class DirichletChebyshev(Composite, Chebyshev):
-
     def __init__(self, N, domain=(-1, 1), bc=(0, 0)):
         Chebyshev.__init__(self, N, domain=domain)
         self.B = Dirichlet(bc, domain, self.reference_domain)
@@ -312,17 +356,24 @@ class DirichletChebyshev(Composite, Chebyshev):
             return sp.cos(j*sp.acos(x)) - sp.cos((j+2)*sp.acos(x))
         return Cheb.basis(j)-Cheb.basis(j+2)
 
-
 class NeumannChebyshev(Composite, Chebyshev):
     def __init__(self, N, domain=(-1, 1), bc=(0, 0), constraint=0):
-        raise NotImplementedError
+        Chebyshev.__init__(self, N, domain=domain)
+        self.B = Neumann(bc, domain, self.reference_domain)
+        self.S = sparse.diags((1, self.neumann_boundaries_chebyshev(N)), 
+                              (0, 2), shape=(N+1, N+3), format='csr')
 
     def basis_function(self, j, sympy=False):
-        raise NotImplementedError
+        beta = -(j**2)/(j**2+4*j+4)
+        if sympy:
+            return sp.cos(j*sp.acos(x))+beta*sp.cos((j+2)*sp.acos(x))
+        return Cheb.basis(j)+beta*Cheb.basis(j+2)
 
+    def neumann_boundaries_chebyshev(self, N):
+        weights = [-(i**2)/(i**2+4*i+4) for i in range(0, N + 1)]
+        return weights
 
 class BasisFunction:
-
     def __init__(self, V, diff=0, argument=0):
         self._V = V
         self._num_derivatives = diff
@@ -345,13 +396,11 @@ class BasisFunction:
 
 
 class TestFunction(BasisFunction):
-
     def __init__(self, V, diff=0):
         BasisFunction.__init__(self, V, diff=diff, argument=0)
 
 
 class TrialFunction(BasisFunction):
-
     def __init__(self, V, diff=0):
         BasisFunction.__init__(self, V, diff=diff, argument=1)
 
@@ -393,7 +442,7 @@ def project(ue, V):
     u = TrialFunction(V)
     v = TestFunction(V)
     b = inner(ue, v)
-    A = inner(u, v)
+    A = csr_matrix(inner(u, v))
     uh = sparse.linalg.spsolve(A, b)
     return uh
 
@@ -407,7 +456,6 @@ def L2_error(uh, ue, V, kind='norm'):
     elif kind == 'inf':
         return max(abs(uj-uej))
 
-
 def test_project():
     ue = sp.besselj(0, x)
     domain = (0, 10)
@@ -415,8 +463,7 @@ def test_project():
         V = space(16, domain=domain)
         u = project(ue, V)
         err = L2_error(u, ue, V)
-        print(
-            f'test_project: L2 error = {err:2.4e}, N = {V.N}, {V.__class__.__name__}')
+        print(f'test_project: L2 error = {err:2.4e}, N = {V.N}, {V.__class__.__name__}')
         assert err < 1e-6
 
 
@@ -424,7 +471,7 @@ def test_helmholtz():
     ue = sp.besselj(0, x)
     f = ue.diff(x, 2)+ue
     domain = (0, 10)
-    for space in (NeumannChebyshev, NeumannLegendre, DirichletChebyshev, DirichletLegendre, Sines, Cosines):
+    for space in (Cosines, NeumannLegendre, DirichletChebyshev, DirichletLegendre, Sines, NeumannChebyshev):
         if space in (NeumannChebyshev, NeumannLegendre, Cosines):
             bc = ue.diff(x, 1).subs(x, domain[0]), ue.diff(
                 x, 1).subs(x, domain[1])
@@ -438,8 +485,7 @@ def test_helmholtz():
         b = inner(f-(V.B.x.diff(x, 2)+V.B.x), v)
         u_tilde = np.linalg.solve(A, b)
         err = L2_error(u_tilde, ue, V)
-        print(
-            f'test_helmholtz: L2 error = {err:2.4e}, N = {N}, {V.__class__.__name__}')
+        print(f'test_helmholtz: L2 error = {err:2.4e}, N = {N}, {V.__class__.__name__}')
         assert err < 1e-3
 
 
@@ -457,12 +503,11 @@ def test_convection_diffusion():
         b = inner(f-((1/eps)*V.B.x.diff(x, 1)), v)
         u_tilde = np.linalg.solve(A, b)
         err = L2_error(u_tilde, ue, V)
-        print(
-            f'test_convection_diffusion: L2 error = {err:2.4e}, N = {N}, {V.__class__.__name__}')
+        print(f'test_convection_diffusion: L2 error = {err:2.4e}, N = {N}, {V.__class__.__name__}')
         assert err < 1e-3
 
 
 if __name__ == '__main__':
     test_project()
-    test_convection_diffusion()
     test_helmholtz()
+    test_convection_diffusion()
